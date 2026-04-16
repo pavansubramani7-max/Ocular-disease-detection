@@ -7,7 +7,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
 *.egg-info/
 
 # Virtual environment
@@ -19,7 +18,6 @@ env/
 results/
 
 # Dataset
-*.csv
 dataset.csv
 
 # IDE
@@ -29,3 +27,6 @@ dataset.csv
 # OS
 .DS_Store
 Thumbs.db
+
+# Kaggle
+*.json.bak
