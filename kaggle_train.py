@@ -178,22 +178,6 @@ def make_dataset(paths, labels, train=True):
 train_ds = make_dataset(train_paths, train_labels, train=True)
 val_ds   = make_dataset(val_paths,   val_labels,   train=False)
 
-# ── MixUp augmentation ────────────────────────────────────
-def mixup_dataset(ds, alpha=0.2):
-    def mixup(batch1, batch2):
-        imgs1, labels1 = batch1
-        imgs2, labels2 = batch2
-        lam = tf.cast(
-            tf.random.uniform([], 0, 1) if alpha <= 0
-            else np.random.beta(alpha, alpha),
-            tf.float32)
-        imgs   = lam * imgs1 + (1 - lam) * imgs2
-        labels = lam * labels1 + (1 - lam) * labels2
-        return imgs, labels
-    return tf.data.Dataset.zip((ds, ds.skip(1))).map(mixup, num_parallel_calls=AUTOTUNE)
-
-train_ds_mixup = mixup_dataset(train_ds, alpha=0.2)
-
 # ── SE block + head ───────────────────────────────────────
 def se_block(x, ratio=16):
     ch = x.shape[-1]
@@ -320,7 +304,7 @@ def train_model(model_name):
             learning_rate=cosine_lr(p1_lr, EPOCHS_P1), clipnorm=1.0),
         loss=focal_loss(), metrics=get_metrics())
     t0 = time.time()
-    h1 = model.fit(train_ds_mixup, validation_data=val_ds,
+    h1 = model.fit(train_ds, validation_data=val_ds,
                    epochs=EPOCHS_P1, class_weight=class_weights,
                    callbacks=get_callbacks(save_path, None), verbose=1)
     best1 = max(h1.history["val_accuracy"])
