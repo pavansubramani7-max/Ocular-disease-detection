@@ -30,7 +30,7 @@ IMG_SIZE    = 224
 BATCH_SIZE  = 32
 RANDOM_SEED = 42
 EPOCHS_P1   = 15
-EPOCHS_P2   = 20
+EPOCHS_P2   = 25   # more fine-tuning epochs for best accuracy
 
 np.random.seed(RANDOM_SEED)
 tf.random.set_seed(RANDOM_SEED)
@@ -136,10 +136,11 @@ for cls_name, boost in [("hypertension",2.5),("ageDegeneration",1.5),("myopia",1
     if idx >= 0: class_weights[idx] *= boost
 print("Class weights:", {k: round(v,3) for k,v in class_weights.items()})
 
-AUTOTUNE    = tf.data.AUTOTUNE
-INPUT_SHAPE = (IMG_SIZE, IMG_SIZE, 3)
+steps_per_epoch = math.ceil(len(train_paths) / BATCH_SIZE)
+AUTOTUNE        = tf.data.AUTOTUNE
+INPUT_SHAPE     = (IMG_SIZE, IMG_SIZE, 3)
 
-# ── Data pipeline ─────────────────────────────────────────
+# ── Strong augmentation ───────────────────────────────────
 def augment(img):
     img = tf.image.random_flip_left_right(img)
     img = tf.image.random_flip_up_down(img)
@@ -177,6 +178,22 @@ def make_dataset(paths, labels, train=True):
 train_ds = make_dataset(train_paths, train_labels, train=True)
 val_ds   = make_dataset(val_paths,   val_labels,   train=False)
 
+# ── MixUp augmentation ────────────────────────────────────
+def mixup_dataset(ds, alpha=0.2):
+    def mixup(batch1, batch2):
+        imgs1, labels1 = batch1
+        imgs2, labels2 = batch2
+        lam = tf.cast(
+            tf.random.uniform([], 0, 1) if alpha <= 0
+            else np.random.beta(alpha, alpha),
+            tf.float32)
+        imgs   = lam * imgs1 + (1 - lam) * imgs2
+        labels = lam * labels1 + (1 - lam) * labels2
+        return imgs, labels
+    return tf.data.Dataset.zip((ds, ds.skip(1))).map(mixup, num_parallel_calls=AUTOTUNE)
+
+train_ds_mixup = mixup_dataset(train_ds, alpha=0.2)
+
 # ── SE block + head ───────────────────────────────────────
 def se_block(x, ratio=16):
     ch = x.shape[-1]
@@ -205,7 +222,6 @@ def build_efficientnetb3(trainable=False):
     x   = layers.Rescaling(255.0)(inp)
     bb  = EfficientNetB3(include_top=False, weights="imagenet", input_tensor=x)
     bb.trainable = trainable
-    # NO se_block — EfficientNetB3 has SE built-in
     return Model(inputs=inp, outputs=build_head(bb.output, "effb3"), name="EfficientNetB3")
 
 def build_resnet50(trainable=False):
@@ -236,7 +252,7 @@ def build_vgg16(trainable=False):
     x = bb(keras.applications.vgg16.preprocess_input(inp * 255.0), training=False)
     return Model(inputs=inp, outputs=build_head(x, "vgg"), name="VGG16")
 
-# ── Loss ──────────────────────────────────────────────────
+# ── Focal loss + label smoothing ──────────────────────────
 def focal_loss(gamma=2.0, smoothing=0.1):
     def loss_fn(y_true, y_pred):
         y_pred = tf.clip_by_value(tf.cast(y_pred, tf.float32), 1e-8, 1.0)
@@ -251,6 +267,13 @@ def get_metrics():
             keras.metrics.AUC(name="auc"),
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall")]
+
+# ── Cosine annealing LR ───────────────────────────────────
+def cosine_lr(initial_lr, epochs):
+    return keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=initial_lr,
+        decay_steps=epochs * steps_per_epoch,
+        alpha=0.01)
 
 # ── ALL 5 MODEL CONFIGS ───────────────────────────────────
 MODEL_CONFIGS = {
@@ -272,6 +295,14 @@ def get_callbacks(save_path, best_so_far=None):
                           patience=4, min_lr=1e-7, verbose=1),
     ]
 
+# ── TTA prediction ────────────────────────────────────────
+def predict_tta(model, val_ds, n=3):
+    all_preds = [model.predict(val_ds, verbose=0)]
+    aug_ds = make_dataset(val_paths, val_labels, train=True)
+    for _ in range(n - 1):
+        all_preds.append(model.predict(aug_ds, verbose=0))
+    return np.mean(all_preds, axis=0)
+
 # ── Training ──────────────────────────────────────────────
 def train_model(model_name):
     builder, p1_lr, p2_lr, unfreeze_pct = MODEL_CONFIGS[model_name]
@@ -281,12 +312,15 @@ def train_model(model_name):
     print(f"  Training: {model_name}")
     print("=" * 60)
 
+    # Phase 1 — frozen backbone with cosine LR
     print(f"  PHASE 1 — Frozen | {EPOCHS_P1} epochs | lr={p1_lr}")
     model = builder(trainable=False)
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=p1_lr, clipnorm=1.0),
-                  loss=focal_loss(), metrics=get_metrics())
+    model.compile(
+        optimizer=keras.optimizers.Adam(
+            learning_rate=cosine_lr(p1_lr, EPOCHS_P1), clipnorm=1.0),
+        loss=focal_loss(), metrics=get_metrics())
     t0 = time.time()
-    h1 = model.fit(train_ds, validation_data=val_ds,
+    h1 = model.fit(train_ds_mixup, validation_data=val_ds,
                    epochs=EPOCHS_P1, class_weight=class_weights,
                    callbacks=get_callbacks(save_path, None), verbose=1)
     best1 = max(h1.history["val_accuracy"])
@@ -295,6 +329,7 @@ def train_model(model_name):
           f"rec={max(h1.history['val_recall']):.4f} | "
           f"prec={max(h1.history['val_precision']):.4f}")
 
+    # Phase 2 — fine-tune with cosine LR
     print(f"  PHASE 2 — Fine-tune top {int(unfreeze_pct*100)}% | {EPOCHS_P2} epochs | lr={p2_lr}")
     for layer in model.layers:
         if hasattr(layer, "layers"):
@@ -304,8 +339,10 @@ def train_model(model_name):
                 sub.trainable = False if isinstance(sub, layers.BatchNormalization) \
                                 else (i >= cutoff)
 
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=p2_lr, clipnorm=1.0),
-                  loss=focal_loss(), metrics=get_metrics())
+    model.compile(
+        optimizer=keras.optimizers.Adam(
+            learning_rate=cosine_lr(p2_lr, EPOCHS_P2), clipnorm=1.0),
+        loss=focal_loss(), metrics=get_metrics())
     t0 = time.time()
     h2 = model.fit(train_ds, validation_data=val_ds,
                    epochs=EPOCHS_P2, class_weight=class_weights,
@@ -341,9 +378,9 @@ print("=" * 60)
 for name, acc in results.items():
     print(f"  {name:20s}  val_acc={acc:.4f}")
 
-# ── Full Evaluation ───────────────────────────────────────
+# ── Full Evaluation with TTA ──────────────────────────────
 print("\n" + "=" * 60)
-print("  FULL EVALUATION")
+print("  FULL EVALUATION WITH TTA")
 print("=" * 60)
 
 idx2cls         = {v: k for k, v in CLASS_TO_IDX.items()}
@@ -364,21 +401,40 @@ def print_report(name, preds, probs):
     for i, c in enumerate(cls_names):
         print(f"    {c:42s}: {roc_auc_score(true_val_onehot[:,i], probs[:,i]):.4f}")
 
-all_probs = []
+# Weighted ensemble — trust better models more
+ENSEMBLE_WEIGHTS = {
+    "densenet121"   : 0.25,
+    "resnet50"      : 0.25,
+    "efficientnetb3": 0.20,
+    "mobilenetv2"   : 0.15,
+    "vgg16"         : 0.15,
+}
+
+all_probs  = []
+all_names  = []
 for name in MODEL_CONFIGS:
     path = os.path.join(OUTPUT_DIR, name + "_model.keras")
     if not os.path.exists(path):
         print(f"  SKIP {name} — not found"); continue
     m     = keras.models.load_model(path, compile=False)
-    p     = m.predict(val_ds, verbose=0)
+    p     = predict_tta(m, val_ds, n=3)   # TTA with 3 passes
     preds = np.argmax(p, axis=1)
     all_probs.append(p)
-    print_report(name, preds, p)
+    all_names.append(name)
+    print_report(f"{name} (TTA)", preds, p)
     del m; gc.collect()
 
+# Weighted ensemble
 if len(all_probs) >= 2:
-    ep = np.argmax(np.mean(all_probs, axis=0), axis=1)
-    print_report("ENSEMBLE (all 5 models)", ep, np.mean(all_probs, axis=0))
+    weighted = np.zeros_like(all_probs[0])
+    total_w  = 0.0
+    for name, p in zip(all_names, all_probs):
+        w = ENSEMBLE_WEIGHTS.get(name, 0.20)
+        weighted += p * w
+        total_w  += w
+    weighted  /= total_w
+    ens_preds  = np.argmax(weighted, axis=1)
+    print_report("WEIGHTED ENSEMBLE (TTA)", ens_preds, weighted)
 
 # ── Files to download ─────────────────────────────────────
 print("\n" + "=" * 60)
