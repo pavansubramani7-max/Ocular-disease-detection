@@ -7,7 +7,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Model
 from tensorflow.keras.applications import EfficientNetB3, ResNet50, DenseNet121, MobileNetV2, VGG16
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
@@ -275,8 +275,6 @@ def get_callbacks(save_path, best_so_far=None):
                         initial_value_threshold=best_so_far),
         EarlyStopping(monitor="val_accuracy", patience=8,
                       restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor="val_loss", factor=0.3,
-                          patience=4, min_lr=1e-7, verbose=1),
     ]
 
 # ── TTA prediction ────────────────────────────────────────
