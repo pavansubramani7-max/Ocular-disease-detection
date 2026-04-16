@@ -70,7 +70,7 @@ def copy_images(src_dir, target_cls, label):
     print(f"  {label} → {target_cls}: {count}")
     return count
 
-# ── Dataset 1: manan1717 (A,C,D,G,H,M,N folders) ─────────
+# ── Dataset 1: manan1717 ──────────────────────────────────
 print("\nLoading manan1717...")
 BASE1 = "/kaggle/input/datasets/manan1717/ocular-disease-dataset/preprocessed"
 MAP1  = {"A":"ageDegeneration","C":"cataract","D":"diabetes",
@@ -205,7 +205,8 @@ def build_efficientnetb3(trainable=False):
     x   = layers.Rescaling(255.0)(inp)
     bb  = EfficientNetB3(include_top=False, weights="imagenet", input_tensor=x)
     bb.trainable = trainable
-    return Model(inputs=inp, outputs=build_head(se_block(bb.output), "effb3"), name="EfficientNetB3")
+    # NO se_block — EfficientNetB3 has SE built-in
+    return Model(inputs=inp, outputs=build_head(bb.output, "effb3"), name="EfficientNetB3")
 
 def build_resnet50(trainable=False):
     inp = layers.Input(shape=INPUT_SHAPE, name="res50_in")
@@ -251,10 +252,13 @@ def get_metrics():
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall")]
 
-# ── Model configs — ONLY 2 NEW MODELS ───────────────────
+# ── ALL 5 MODEL CONFIGS ───────────────────────────────────
 MODEL_CONFIGS = {
-    "densenet121" : (build_densenet121, 3e-3, 5e-5, 0.30),
-    "vgg16"       : (build_vgg16,       3e-3, 5e-5, 0.30),
+    "mobilenetv2"   : (build_mobilenetv2,    3e-3, 5e-5, 0.30),
+    "efficientnetb3": (build_efficientnetb3, 1e-3, 2e-5, 0.40),
+    "densenet121"   : (build_densenet121,    3e-3, 5e-5, 0.30),
+    "resnet50"      : (build_resnet50,       3e-3, 5e-5, 0.30),
+    "vgg16"         : (build_vgg16,          1e-3, 1e-5, 0.30),
 }
 
 def get_callbacks(save_path, best_so_far=None):
@@ -271,7 +275,7 @@ def get_callbacks(save_path, best_so_far=None):
 # ── Training ──────────────────────────────────────────────
 def train_model(model_name):
     builder, p1_lr, p2_lr, unfreeze_pct = MODEL_CONFIGS[model_name]
-    save_path = os.path.join(OUTPUT_DIR, model_name + "_model.h5")
+    save_path = os.path.join(OUTPUT_DIR, model_name + "_model.keras")
 
     print("\n" + "=" * 60)
     print(f"  Training: {model_name}")
@@ -317,7 +321,7 @@ def train_model(model_name):
     del model; gc.collect(); tf.keras.backend.clear_session()
     return best
 
-# ── Train all 5 ───────────────────────────────────────────
+# ── Train ALL 5 models ────────────────────────────────────
 t_start = time.time()
 results = {}
 for name in MODEL_CONFIGS:
@@ -337,7 +341,7 @@ print("=" * 60)
 for name, acc in results.items():
     print(f"  {name:20s}  val_acc={acc:.4f}")
 
-# ── Evaluation ────────────────────────────────────────────
+# ── Full Evaluation ───────────────────────────────────────
 print("\n" + "=" * 60)
 print("  FULL EVALUATION")
 print("=" * 60)
@@ -362,7 +366,7 @@ def print_report(name, preds, probs):
 
 all_probs = []
 for name in MODEL_CONFIGS:
-    path = os.path.join(OUTPUT_DIR, name + "_model.h5")
+    path = os.path.join(OUTPUT_DIR, name + "_model.keras")
     if not os.path.exists(path):
         print(f"  SKIP {name} — not found"); continue
     m     = keras.models.load_model(path, compile=False)
@@ -374,11 +378,11 @@ for name in MODEL_CONFIGS:
 
 if len(all_probs) >= 2:
     ep = np.argmax(np.mean(all_probs, axis=0), axis=1)
-    print_report("ENSEMBLE", ep, np.mean(all_probs, axis=0))
+    print_report("ENSEMBLE (all 5 models)", ep, np.mean(all_probs, axis=0))
 
 # ── Files to download ─────────────────────────────────────
 print("\n" + "=" * 60)
-print("  FILES TO DOWNLOAD:")
+print("  FILES TO DOWNLOAD FROM OUTPUT TAB:")
 print("=" * 60)
 for fn in sorted(os.listdir(OUTPUT_DIR)):
     fp = os.path.join(OUTPUT_DIR, fn)
