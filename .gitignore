@@ -1,0 +1,31 @@
+# Model files (too large for GitHub)
+saved_models/*.keras
+saved_models/*.h5
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environment
+venv/
+env/
+.env
+
+# Results (generated files)
+results/
+
+# Dataset
+*.csv
+dataset.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

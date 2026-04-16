@@ -1,0 +1,9 @@
+{
+  "Age-related Macular Degeneration": 0,
+  "Cataracts": 1,
+  "Diabetic Retinopathy": 2,
+  "Glaucoma": 3,
+  "Hypertension": 4,
+  "Myopia": 5,
+  "Normal": 6
+}
